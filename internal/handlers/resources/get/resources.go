@@ -1,7 +1,6 @@
 package resources
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -58,6 +57,8 @@ var _ http.Handler = (*handler)(nil)
 // @Success 200 {object} []Resource
 // @Router /resources [get]
 func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
 	compositionName := r.URL.Query().Get("compositionName")
 	compositionNamespace := r.URL.Query().Get("compositionNamespace")
 	compositionDefinitionName := r.URL.Query().Get("compositionDefinitionName")
@@ -77,7 +78,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		slog.String("compositionDefinitionNamespace", compositionDefinitionNamespace))
 
 	if compositionName == "" || compositionNamespace == "" || compositionDefinitionName == "" || compositionDefinitionNamespace == "" || compositionVersion == "" || compositionResource == "" {
-		log.Error("missing required query parameters")
+		log.ErrorContext(ctx, "missing required query parameters")
 		response.BadRequest(w, fmt.Errorf("missing required query parameters"))
 		return
 	}
@@ -97,14 +98,14 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		Resource: compositionDefinitionResource,
 	}
 
-	log.Info("Handling request to get resources")
+	log.InfoContext(ctx, "Handling request to get resources")
 
 	composition, err := h.DynamicClient.
 		Resource(compositionGVR).
 		Namespace(compositionNamespace).
-		Get(context.Background(), compositionName, v1.GetOptions{})
+		Get(ctx, compositionName, v1.GetOptions{})
 	if err != nil {
-		log.Error("unable to get composition",
+		log.ErrorContext(ctx, "unable to get composition",
 			slog.String("compositionName", compositionName),
 			slog.String("compositionNamespace", compositionNamespace),
 			slog.String("compositionVersion", compositionVersion),
@@ -119,7 +120,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// NOTE: bValues are extracted and injected with composition context
 	bValuesMap, err := helmutils.ValuesFromSpec(composition)
 	if err != nil {
-		log.Error("unable to extract values from composition",
+		log.ErrorContext(ctx, "unable to extract values from composition",
 			slog.Any("err", err),
 		)
 		response.InternalError(w, err)
@@ -127,7 +128,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	err = bValuesMap.InjectGlobalValues(composition, h.Plurarizer, h.KrateoNamespace)
 	if err != nil {
-		log.Error("unable to inject global values",
+		log.ErrorContext(ctx, "unable to inject global values",
 			slog.Any("err", err),
 		)
 		response.InternalError(w, err)
@@ -144,9 +145,9 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	compositionDefinitionU, err := h.DynamicClient.
 		Resource(compositionDefinitionGVR).
 		Namespace(compositionDefinitionNamespace).
-		Get(context.Background(), compositionDefinitionName, v1.GetOptions{})
+		Get(ctx, compositionDefinitionName, v1.GetOptions{})
 	if err != nil {
-		log.Error("unable to get composition definition",
+		log.ErrorContext(ctx, "unable to get composition definition",
 			slog.Any("err", err),
 		)
 		response.InternalError(w, err)
@@ -155,7 +156,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	var compositionDefinition coreprovv1.CompositionDefinition
 	err = runtime.DefaultUnstructuredConverter.FromUnstructured(compositionDefinitionU.Object, &compositionDefinition)
 	if err != nil {
-		log.Error("unable to convert composition definition",
+		log.ErrorContext(ctx, "unable to convert composition definition",
 			slog.Any("err", err),
 		)
 		response.InternalError(w, err)
@@ -188,7 +189,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// Retrieve password from secret
 		passwd, err := k8scli.GetSecret(compositionDefinition.Spec.Chart.Credentials.PasswordRef)
 		if err != nil {
-			log.Error("unable to get secret",
+			log.ErrorContext(ctx, "unable to get secret",
 				slog.Any("err", err),
 			)
 			response.InternalError(w, err)
@@ -198,9 +199,9 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Install with DryRun to get templated manifest using global helm client with tracer integration
-	_, err = h.HelmClient.Install(context.Background(), compositionMeta.GetReleaseName(composition), compositionDefinition.Spec.Chart.Url, installCfg)
+	_, err = h.HelmClient.Install(ctx, compositionMeta.GetReleaseName(composition), compositionDefinition.Spec.Chart.Url, installCfg)
 	if err != nil {
-		log.Error("unable to template chart",
+		log.ErrorContext(ctx, "unable to template chart",
 			slog.Any("err", err),
 		)
 		response.InternalError(w, err)
@@ -218,11 +219,11 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if meta.IsVerbose(composition) {
 		b, err := json.Marshal(resLi)
 		if err != nil {
-			log.Error("unable to marshal resources for logging",
+			log.ErrorContext(ctx, "unable to marshal resources for logging",
 				slog.Any("err", err),
 			)
 		} else {
-			log.Debug("Retrieved resources",
+			log.DebugContext(ctx, "Retrieved resources",
 				slog.String("resources", string(b)),
 			)
 		}
@@ -233,12 +234,12 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	enc := json.NewEncoder(w)
 	err = enc.Encode(resLi)
 	if err != nil {
-		log.Error("unable to marshal resources",
+		log.ErrorContext(ctx, "unable to marshal resources",
 			slog.Any("err", err),
 		)
 		response.InternalError(w, err)
 		return
 	}
 
-	log.Info("Successfully handled request to get resources")
+	log.InfoContext(ctx, "Successfully handled request to get resources")
 }
