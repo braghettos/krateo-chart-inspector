@@ -17,6 +17,7 @@ import (
 	"github.com/krateoplatformops/chart-inspector/internal/handlers"
 	"github.com/krateoplatformops/chart-inspector/internal/handlers/health"
 	getresources "github.com/krateoplatformops/chart-inspector/internal/handlers/resources/get"
+	"github.com/krateoplatformops/chart-inspector/internal/telemetry"
 	"github.com/krateoplatformops/plumbing/env"
 	"github.com/krateoplatformops/plumbing/helm/getter/cache"
 	helmv3 "github.com/krateoplatformops/plumbing/helm/v3"
@@ -47,7 +48,31 @@ func main() {
 
 	mux := http.NewServeMux()
 
+	// Telemetry is gated and defaults to OFF: when disabled, Setup registers
+	// nothing and the behaviour below is byte-identical to a build without it.
+	telCtx := context.Background()
+	telCfg := telemetry.ConfigFromEnv()
+	tel, err := telemetry.Setup(telCtx, telCfg)
+	if err != nil {
+		// Fall back to the no-op provider; never fail startup on telemetry.
+		logger.New(serviceName, *debugOn).Error("setting up telemetry", slog.Any("error", err))
+		tel = &telemetry.Provider{}
+	}
+	defer func() {
+		shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = tel.Shutdown(shutCtx)
+	}()
+
+	// Build the request logger. Default-off path is the unchanged plumbing
+	// logger (byte-identical, incl. the debug env dump). When tracing is on,
+	// wrap the same JSON handler to enrich records with trace_id/span_id so
+	// OTel-JSON logs correlate with spans.
 	log := logger.New(serviceName, *debugOn)
+	if tel.TracingEnabled() {
+		log = slog.New(tel.WithTraceCorrelation(logger.NewHandler(*debugOn, os.Stderr))).
+			With(slog.String("service", serviceName))
+	}
 
 	go func() {
 		if err := http.ListenAndServe("localhost:6060", nil); err != nil {
@@ -57,7 +82,6 @@ func main() {
 
 	// Kubernetes configuration
 	var cfg *rest.Config
-	var err error
 	if len(*kubeconfig) > 0 {
 		cfg, err = clientcmd.BuildConfigFromFlags("", *kubeconfig)
 	} else {
@@ -105,9 +129,14 @@ func main() {
 
 	healthy := int32(0)
 
+	// Health probes are registered unwrapped (otelhttp/metrics filter them
+	// anyway). The /resources inspection — the cdc's chart-inspection
+	// dependency and the heavy endpoint — is instrumented so its server span
+	// parents off the cdc's inbound traceparent, completing the
+	// cdc -> chart-inspector trace chain.
 	mux.Handle("/healthz", health.Live())
 	mux.Handle("/readyz", health.Ready(&healthy))
-	mux.Handle("/resources", getresources.GetResources(opts))
+	mux.Handle("/resources", tel.Instrument("/resources", getresources.GetResources(opts)))
 	mux.Handle("/swagger/", httpSwagger.WrapHandler)
 
 	server := &http.Server{
